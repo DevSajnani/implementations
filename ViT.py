@@ -1,17 +1,33 @@
 import torch
 from torch import nn
-import copy
 import einops
+
+class Config: 
+  class Config:
+    d_model: int = 768
+    d_mlp: int = 3072
+    n_heads: int = 12
+    n_layers: int = 12
+    patch_size: int = 16
+    in_channels: int = 3
+    batch_size: int = 32
+    height: int = 224 
+    width: int = 224
+    droput_msa: float = 0.0 
+    dropout_mlp: float = 0.1
+    num_classes: int = 3
 
 
 class PatchEmbeddings(nn.Module):
-  def __init__(self, patch_size, hidden_d, in_channels):
+  def __init__(self, cfg: Config):
     super().__init__()
-    self.patch_size = patch_size
-    self.patcher = nn.Conv2d(in_channels=in_channels,
+    self.cfg = cfg
+    self.patch_size = self.cfg.patch_size
+    hidden_d = self.cfg.d_model
+    self.patcher = nn.Conv2d(in_channels=self.cfg.in_channels,
                    out_channels=hidden_d,
-                   kernel_size=patch_size,
-                   stride=patch_size,
+                   kernel_size=self.patch_size,
+                   stride=self.patch_size,
                    padding=0)
 
   def forward(self, x):
@@ -22,11 +38,12 @@ class PatchEmbeddings(nn.Module):
   
 
 class LearnedPositionEmbeddings(nn.Module): 
-  def __init__(self, b, d, n): 
+  def __init__(self, cfg: Config): 
     super().__init__()
-    self.tokens = nn.Parameter(torch.rand(b, 1, d),
+    self.cfg = cfg
+    self.tokens = nn.Parameter(torch.rand(self.cfg.batch_size, 1, self.cfg.d_model),
                            requires_grad=True) 
-    self.positional_encoding = nn.Parameter(torch.rand(b, n+1, d),
+    self.positional_encoding = nn.Parameter(torch.rand(self.cfg.batch_size, ((self.cfg.height * self.cfg.width) // (self.cfg.patch_size**2)), self.cfg.d_model),
                                   requires_grad=True)
 
   def forward(self, x): 
@@ -37,10 +54,11 @@ class LearnedPositionEmbeddings(nn.Module):
 
 
 class MultiHeadedSelfAttention(nn.Module): 
-  def __init__(self, d, heads, dropout): 
+  def __init__(self, cfg: Config): 
     super().__init__()
-    self.layer_norm = nn.LayerNorm(normalized_shape=d)
-    self.multiheadedAtt = nn.MultiheadAttention(embed_dim=d, num_heads=heads, dropout=dropout, batch_first=True)
+    self.cfg = cfg
+    self.layer_norm = nn.LayerNorm(normalized_shape=self.cfg.d_model)
+    self.multiheadedAtt = nn.MultiheadAttention(embed_dim=self.cfg.d_model, num_heads=self.cfg.n_heads, dropout=self.cfg.droput_msa, batch_first=True)
 
   def forward(self, x): 
     x = self.layer_norm(x)
@@ -53,15 +71,16 @@ class MultiHeadedSelfAttention(nn.Module):
 
 
 class MLPLayer(nn.Module): 
-  def __init__(self, d, mlp_size, dropout): 
+  def __init__(self, cfg: Config): 
     super().__init__()
-    self.layerNorm = nn.LayerNorm(normalized_shape=d)
+    self.cfg = cfg
+    self.layerNorm = nn.LayerNorm(normalized_shape=self.cfg.d_model)
     self.mlp = nn.Sequential(
-        nn.Linear(in_features=d, out_features=mlp_size), 
+        nn.Linear(in_features=self.cfg.d_model, out_features=self.cfg.d_mlp), 
         nn.GELU(), 
-        nn.Dropout(p=dropout),
-        nn.Linear(in_features=mlp_size, out_features=d),
-        nn.Dropout(p=dropout)
+        nn.Dropout(p=self.cfg.dropout_mlp),
+        nn.Linear(in_features=self.cfg.d_mlp, out_features=self.cfg.d_model),
+        nn.Dropout(p=self.cfg.dropout_mlp)
     )
 
   def forward(self, x): 
@@ -71,10 +90,11 @@ class MLPLayer(nn.Module):
   
 
 class TransformerBlock(nn.Module): 
-  def __init__(self, d, mlp_size, heads, dropout): 
+  def __init__(self, cfg: Config): 
     super().__init__()
-    self.msa = MultiHeadedSelfAttention(d, heads, dropout)
-    self.mlp = MLPLayer(d, mlp_size, dropout)
+    self.cfg = cfg
+    self.msa = MultiHeadedSelfAttention(cfg)
+    self.mlp = MLPLayer(cfg)
 
   def forward(self, x): 
     x = self.msa(x) + x
@@ -82,24 +102,25 @@ class TransformerBlock(nn.Module):
     return x 
   
 class ClassificationHead(nn.Module): 
-  def __init__(self, d, n_classes): 
+  def __init__(self, cfg: Config): 
     super().__init__()
+    self.cfg = cfg
     self.classify = nn.Sequential(
-        nn.LayerNorm(d),
-        nn.Linear(in_features=d, out_features=n_classes)
+        nn.LayerNorm(self.cfg.d_model),
+        nn.Linear(in_features=self.cfg.d_model, out_features=self.cfg.num_classes)
     )
 
   def forward(self, x): 
     return self.classify(x)
   
 class ViT(nn.Module): 
-  def __init__(self, transformer_layer, patcher, embed, n_layers, classifier): 
+  def __init__(self, cfg): 
     super().__init__()
-    self.n = n_layers
-    self.transformer = nn.ModuleList([copy.deepcopy(transformer_layer) for _ in range(n_layers)])
-    self.patch_emb = patcher
-    self.pos_emb = embed
-    self.classify = classifier
+    self.cfg = cfg
+    self.transformer = nn.ModuleList([TransformerBlock(cfg) for _ in range(self.cfg.n_layers)])
+    self.patch_emb = PatchEmbeddings(cfg)
+    self.pos_emb = LearnedPositionEmbeddings(cfg)
+    self.classify = ClassificationHead(cfg)
 
   def forward(self, x): 
     x = self.patch_emb(x)
